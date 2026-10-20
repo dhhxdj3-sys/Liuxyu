@@ -1,38 +1,19 @@
-# liuxy
+# 🌠流星雨许愿网页 (Liuxyu)
 
-This template should help get you started developing with Vue 3 in Vite.
+基于 **Vue 3 + Vite** 开发的沉浸式流星雨交互网页。夜幕星空之下，流星划破天际，支持在线写下心愿并寄托给璀璨星空。
 
-## Recommended IDE Setup
+---
 
-[VS Code](https://code.visualstudio.com/) + [Vue (Official)](https://marketplace.visualstudio.com/items?itemName=Vue.volar) (and disable Vetur).
+##  项目特色
 
-## Recommended Browser Setup
+- **Vue 3 驱动**：使用 Composition API 构建，轻量高效、响应迅速。
+- **流星雨动态效果**：流畅细腻的夜空星光与流星划过动画。
+- **在线许愿互动**：随时输入心愿，让流星承载你的美好祈愿。
 
-- Chromium-based browsers (Chrome, Edge, Brave, etc.):
-  - [Vue.js devtools](https://chromewebstore.google.com/detail/vuejs-devtools/nhdogjmejiglipccpnnnanhbledajbpd)
-  - [Turn on Custom Object Formatter in Chrome DevTools](http://bit.ly/object-formatters)
-- Firefox:
-  - [Vue.js devtools](https://addons.mozilla.org/en-US/firefox/addon/vue-js-devtools/)
-  - [Turn on Custom Object Formatter in Firefox DevTools](https://fxdx.dev/firefox-devtools-custom-object-formatters/)
+---
 
-## Customize configuration
+##  本地运行
 
-See [Vite Configuration Reference](https://vite.dev/config/).
-
-## Project Setup
-
-```sh
-npm install
-```
-
-### Compile and Hot-Reload for Development
-
-```sh
-npm run dev
-```
-
-### Compile and Minify for Production
-
-```sh
-npm run build
-```
+1. **安装依赖**
+   ```sh
+   npm install
