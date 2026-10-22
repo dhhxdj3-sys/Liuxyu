@@ -9,11 +9,13 @@
  *   微星层在上，每帧重绘，避免残影蒙层把星空一起抹掉。
  * - 所有动画初始化在 onMounted，清理在 onUnmounted。
  */
-import { nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 
 /* ============================================================
  * 可调参数
  * ============================================================ */
+const WISH_API_URL = import.meta.env.VITE_WISH_API_URL || '/api/wish'
+const WISH_REQUEST_TIMEOUT = 10000      // 许愿接口超时时间
 const METEOR_ANGLE = Math.PI / 4        // 流星统一方向：右上 -> 左下，45°
 const TRAIL_FADE_AT_60FPS = 0.18        // 每帧黑色蒙层透明度（细长但不糊屏）
 const STAR_MIN = 80                     // 微星数量下限
@@ -34,15 +36,22 @@ const TAU = Math.PI * 2
 /* ============================================================
  * 响应式状态
  * ============================================================ */
-const wishText = ref('')                // 输入框双向绑定
-const bannerVisible = ref(false)        // 顶部横幅显示状态
+const wisherName = ref('')              // 许愿人输入框
+const wishText = ref('')                // 愿望输入框
+const feedback = ref(null)              // 顶部横幅内容（成功 / 失败）
+const isSubmitting = ref(false)         // 许愿接口请求中
+const invalidField = ref('')            // 校验未通过的字段：wisher / wish / both
 const stageRef = ref(null)
 const starCanvas = ref(null)            // 微星层 Canvas
 const meteorCanvas = ref(null)          // 流星层 Canvas
+const wisherInputRef = ref(null)
 const inputRef = ref(null)
 const composerRef = ref(null)
 const meteors = ref([])                 // 流星对象数组（环境流星 + 许愿流星）
 const wishNote = ref(null)              // 绑定在星星上的愿望文字
+const canSubmit = computed(
+  () => wisherName.value.trim().length > 0 && wishText.value.trim().length > 0
+)
 
 /* ============================================================
  * 非响应式运行时变量（不参与渲染，避免每帧触发额外更新）
@@ -59,6 +68,7 @@ let bannerTimer = 0
 let wishNoteTimer = 0
 let meteorSequence = 0
 let wishNoteSequence = 0
+let feedbackSequence = 0
 let isUnmounted = false
 let prefersReducedMotion = false
 
@@ -549,41 +559,117 @@ function nudgeComposer() {
   )
 }
 
-function showBanner() {
+function showFeedback(type, title, subtitle) {
   if (bannerTimer) window.clearTimeout(bannerTimer)
-  bannerVisible.value = true
-  bannerTimer = window.setTimeout(() => {
-    bannerVisible.value = false
-    bannerTimer = 0
-  }, BANNER_DURATION)
+  feedback.value = { id: ++feedbackSequence, type, title, subtitle }
+  bannerTimer = window.setTimeout(
+    () => {
+      feedback.value = null
+      bannerTimer = 0
+    },
+    type === 'error' ? BANNER_DURATION + 800 : BANNER_DURATION
+  )
 }
 
-function sendWish() {
+function clearInvalidField() {
+  invalidField.value = ''
+}
+
+function validateForm(wisher, text) {
+  if (!wisher || !text) {
+    if (!wisher && !text) {
+      invalidField.value = 'both'
+      showFeedback('error', '信息不完整', '请填写许愿人和愿望')
+      nextTick(() => wisherInputRef.value?.focus())
+    } else if (!wisher) {
+      invalidField.value = 'wisher'
+      showFeedback('error', '信息不完整', '请填写许愿人')
+      nextTick(() => wisherInputRef.value?.focus())
+    } else {
+      invalidField.value = 'wish'
+      showFeedback('error', '信息不完整', '请填写愿望')
+      nextTick(() => inputRef.value?.focus())
+    }
+    return false
+  }
+
+  invalidField.value = ''
+  return true
+}
+
+function vibrate() {
+  if (typeof navigator.vibrate !== 'function') return
+  try {
+    navigator.vibrate(12)
+  } catch {
+    // 部分浏览器会拒绝震动权限，忽略即可
+  }
+}
+
+async function sendWish() {
+  if (isSubmitting.value) return
+
+  const wisher = wisherName.value.trim()
   const text = wishText.value.trim()
 
-  // 非空校验
-  if (!text) {
+  if (!validateForm(wisher, text)) {
     nudgeComposer()
-    nextTick(() => inputRef.value?.focus())
     return
   }
 
-  // 先清空输入框，再发射流星，并把文字固定到一颗星星上
-  wishText.value = ''
-  launchWishMeteor()
-  showWishNote(text)
-  showBanner()
+  isSubmitting.value = true
+  const controller = new AbortController()
+  const timeoutId = window.setTimeout(() => controller.abort(), WISH_REQUEST_TIMEOUT)
 
-  if (typeof navigator.vibrate === 'function') {
+  try {
+    const response = await fetch(WISH_API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ wisher, wish: text }),
+      signal: controller.signal
+    })
+
+    let payload = null
     try {
-      navigator.vibrate(12)
+      payload = await response.json()
     } catch {
-      // 部分浏览器会拒绝震动权限，忽略即可
+      payload = null
     }
-  }
 
-  // 收起键盘，让用户完整看到流星划过
-  inputRef.value?.blur()
+    if (!response.ok || payload?.success !== true) {
+      const fallbackMessage =
+        response.status >= 500
+          ? '许愿服务暂时不可用，请稍后重试'
+          : `请求失败（HTTP ${response.status}）`
+      showFeedback('error', '许愿失败', payload?.message || fallbackMessage)
+      nudgeComposer()
+      return
+    }
+
+    // 服务端保存成功后，再清空输入并播放许愿动效
+    wisherName.value = ''
+    wishText.value = ''
+    invalidField.value = ''
+    launchWishMeteor()
+    showWishNote(text)
+    showFeedback('success', '许愿成功', `${wisher}，你将得偿所愿`)
+    vibrate()
+
+    // 收起键盘，让用户完整看到流星划过
+    inputRef.value?.blur()
+  } catch (error) {
+    showFeedback(
+      'error',
+      '许愿失败',
+      error?.name === 'AbortError'
+        ? '请求超时，请确认许愿服务正常后重试'
+        : '网络异常，请确认许愿服务已启动后重试'
+    )
+    nudgeComposer()
+  } finally {
+    window.clearTimeout(timeoutId)
+    isSubmitting.value = false
+  }
 }
 
 function resetSky() {
@@ -599,8 +685,10 @@ function resetSky() {
   initStars()
   rebuildAmbientPool()
 
+  wisherName.value = ''
   wishText.value = ''
-  bannerVisible.value = false
+  invalidField.value = ''
+  feedback.value = null
   wishNote.value = null
   if (bannerTimer) {
     window.clearTimeout(bannerTimer)
@@ -702,14 +790,25 @@ onUnmounted(() => {
       {{ wishNote.text }}
     </p>
 
-    <!-- 顶部 iOS 风格通知横幅 -->
+    <!-- 顶部 iOS 风格通知横幅：成功与失败共用 -->
     <Transition name="banner">
-      <div v-if="bannerVisible" class="banner-track" role="status" aria-live="polite">
-        <div class="ios-banner">
-          <div class="banner-icon" aria-hidden="true">✦</div>
+      <div
+        v-if="feedback"
+        :key="feedback.id"
+        class="banner-track"
+        :role="feedback.type === 'error' ? 'alert' : 'status'"
+        :aria-live="feedback.type === 'error' ? 'assertive' : 'polite'"
+      >
+        <div
+          class="ios-banner"
+          :class="{ 'ios-banner--error': feedback.type === 'error' }"
+        >
+          <div class="banner-icon" aria-hidden="true">
+            {{ feedback.type === 'error' ? '!' : '✦' }}
+          </div>
           <div class="banner-copy">
-            <p class="banner-title">许愿成功</p>
-            <p class="banner-subtitle">你将得偿所愿</p>
+            <p class="banner-title">{{ feedback.title }}</p>
+            <p class="banner-subtitle">{{ feedback.subtitle }}</p>
           </div>
           <span class="banner-now">now</span>
         </div>
@@ -722,29 +821,64 @@ onUnmounted(() => {
       <span>还原</span>
     </button>
 
-    <!-- 底部许愿输入胶囊 -->
-    <form class="composer" @submit.prevent="sendWish">
-      <div ref="composerRef" class="composer-shell">
-        <input
-          ref="inputRef"
-          v-model="wishText"
-          class="wish-input"
-          type="text"
-          inputmode="text"
-          enterkeyhint="send"
-          maxlength="30"
-          placeholder="对着流星许下愿望 "
-          aria-label="输入你的愿望"
-          autocomplete="off"
-          autocapitalize="sentences"
-        />
+    <!-- 底部许愿输入胶囊：许愿人与愿望并列 -->
+    <form class="composer" novalidate @submit.prevent="sendWish">
+      <div
+        ref="composerRef"
+        class="composer-shell"
+        :class="{ 'is-invalid': invalidField }"
+      >
+        <label class="composer-field composer-field--wisher">
+          <span class="field-label" aria-hidden="true">许愿人</span>
+          <input
+            id="wisher-input"
+            ref="wisherInputRef"
+            v-model="wisherName"
+            class="wish-input"
+            type="text"
+            inputmode="text"
+            enterkeyhint="next"
+            maxlength="20"
+            placeholder="许愿人"
+            aria-label="许愿人"
+            aria-required="true"
+            :aria-invalid="invalidField === 'wisher' || invalidField === 'both'"
+            autocomplete="nickname"
+            required
+            @input="clearInvalidField"
+          />
+        </label>
+        <span class="field-divider" aria-hidden="true"></span>
+        <label class="composer-field composer-field--wish">
+          <span class="field-label" aria-hidden="true">愿望</span>
+          <input
+            id="wish-input"
+            ref="inputRef"
+            v-model="wishText"
+            class="wish-input"
+            type="text"
+            inputmode="text"
+            enterkeyhint="send"
+            maxlength="30"
+            placeholder="对着流星许下愿望 "
+            aria-label="愿望"
+            aria-required="true"
+            :aria-invalid="invalidField === 'wish' || invalidField === 'both'"
+            autocomplete="off"
+            autocapitalize="sentences"
+            required
+            @input="clearInvalidField"
+          />
+        </label>
         <button
           class="send-button"
-          :class="{ 'is-active': wishText.trim().length > 0 }"
+          :class="{ 'is-active': canSubmit, 'is-submitting': isSubmitting }"
           type="submit"
-          aria-label="发射愿望"
+          :disabled="isSubmitting"
+          :aria-label="isSubmitting ? '正在许愿' : '发射愿望'"
+          :aria-busy="isSubmitting"
         >
-          <span aria-hidden="true">↑</span>
+          <span aria-hidden="true">{{ isSubmitting ? '…' : '↑' }}</span>
         </button>
       </div>
     </form>
@@ -944,6 +1078,22 @@ onUnmounted(() => {
   backdrop-filter: blur(20px) saturate(180%);
 }
 
+.ios-banner--error {
+  border-color: rgba(255, 174, 180, 0.22);
+}
+
+.ios-banner--error .banner-icon {
+  border-color: rgba(255, 168, 176, 0.3);
+  background:
+    radial-gradient(
+      circle at 35% 28%,
+      rgba(255, 196, 201, 0.24),
+      rgba(122, 44, 54, 0.18) 68%
+    );
+  color: #ffe3e6;
+  text-shadow: 0 0 12px rgba(255, 156, 166, 0.55);
+}
+
 .banner-icon {
   display: grid;
   flex: 0 0 38px;
@@ -1102,10 +1252,19 @@ onUnmounted(() => {
     inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
 
+.composer-shell.is-invalid,
+.composer-shell.is-invalid:focus-within {
+  border-color: rgba(255, 164, 172, 0.48);
+  box-shadow:
+    0 20px 55px rgba(0, 0, 0, 0.62),
+    0 0 0 1px rgba(255, 150, 160, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+
 .wish-input {
   min-width: 0;
   height: 100%;
-  flex: 1;
+  flex: 1 1 auto;
   border: 0;
   outline: none;
   background: transparent;
@@ -1123,6 +1282,36 @@ onUnmounted(() => {
 
 .wish-input::placeholder {
   color: rgba(255, 255, 255, 0.34);
+}
+
+/* 桌面端保持单行并列；字段标签仅在手机双行布局中显示 */
+.field-label {
+  display: none;
+}
+
+.composer-field {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  height: 100%;
+}
+
+.composer-field--wisher {
+  flex: 0 1 108px;
+  padding-right: 14px;
+}
+
+.composer-field--wish {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.field-divider {
+  flex: 0 0 1px;
+  width: 1px;
+  height: 20px;
+  margin-right: 14px;
+  background: rgba(255, 255, 255, 0.14);
 }
 
 .send-button {
@@ -1162,10 +1351,87 @@ onUnmounted(() => {
   transform: scale(0.92);
 }
 
+.send-button:disabled {
+  cursor: wait;
+  transform: none;
+}
+
+.send-button.is-submitting {
+  opacity: 0.72;
+}
+
 .reset-button:focus-visible,
 .send-button:focus-visible {
   outline: 2px solid rgba(198, 216, 255, 0.78);
   outline-offset: 3px;
+}
+
+/* ---------------- 手机端：许愿人与愿望上下双行堆叠 ---------------- */
+@media (max-width: 640px) {
+  .composer {
+    bottom: calc(10px + env(safe-area-inset-bottom));
+  }
+
+  .composer-shell {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 44px;
+    grid-template-rows: 48px 48px;
+    column-gap: 8px;
+    height: auto;
+    padding: 4px 7px 4px 16px;
+    border-radius: 26px;
+  }
+
+  .composer-field {
+    height: 100%;
+  }
+
+  .composer-field--wisher {
+    grid-row: 1;
+    grid-column: 1 / -1;
+    padding-right: 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+  }
+
+  .composer-field--wish {
+    grid-row: 2;
+    grid-column: 1;
+  }
+
+  .field-divider {
+    display: none;
+  }
+
+  .field-label {
+    display: block;
+    flex: 0 0 auto;
+    margin-right: 12px;
+    color: rgba(255, 255, 255, 0.36);
+    font-size: 13px;
+    line-height: 1;
+    letter-spacing: 0.08em;
+    transition: color 0.25s ease;
+  }
+
+  .composer-field:focus-within .field-label {
+    color: rgba(221, 232, 255, 0.76);
+  }
+
+  /* 手机端已有固定字段标签，省略会重复的占位文字 */
+  .wish-input::placeholder {
+    color: transparent;
+  }
+
+  .send-button {
+    grid-row: 2;
+    grid-column: 2;
+    align-self: center;
+    margin-left: 0;
+  }
+
+  .reset-button {
+    bottom: calc(130px + env(safe-area-inset-bottom));
+  }
 }
 
 /* ---------------- 无障碍：减少动态效果 ---------------- */
